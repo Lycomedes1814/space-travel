@@ -2,6 +2,8 @@
 
 A minimal terminal disk usage browser, inspired by [ncdu](https://dev.yorhel.nl/ncdu). Written in C with ncurses.
 
+![space-travel screenshot](space-travel.png)
+
 ## Build
 
 Requires ncurses. On Debian/Ubuntu: `apt install libncurses-dev`.
