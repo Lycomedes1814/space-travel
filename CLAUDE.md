@@ -26,8 +26,19 @@ Requires ncurses (`-lncurses`). Compiled with `-std=c11 -Wall -Wextra -Wpedantic
 ## Source layout
 
 Single file: `space-travel.c`. Sections in order:
-1. `Entry` struct + tree helpers (`entry_new`, `entry_push`, `entry_free`)
-2. `scan` — recursive directory walker
+1. `Entry` struct + tree helpers (`entry_new`, `entry_push`, `entry_free`, `entry_detach`)
+2. `scan` — recursive directory walker (`cmp_du`, `entry_sort_recursive`, `basename_of`, `scan`)
 3. `fmt_size` — human-readable size formatting
-4. UI (`UI` struct, `ui_clamp`, `ui_draw`, `run_ui`)
+4. UI (`UI` struct, `ui_clamp`, `ui_draw`, `entry_full_path`, `do_trash`, `run_ui`)
 5. `main`
+
+## Keys
+
+| Key | Action |
+|-----|--------|
+| `j` / `down` | Move down |
+| `k` / `up` | Move up |
+| `enter` / `right` | Enter directory |
+| `backspace` / `left` | Go up to parent |
+| `d` | Move selected entry to `~/.local/share/Trash/files/` (confirms with y/n) |
+| `q` | Quit |

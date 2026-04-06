@@ -28,11 +28,12 @@ space-travel scans the given path, then opens an interactive browser sorted by d
 | `k` / `up` | Move up |
 | `enter` / `right` | Enter directory |
 | `backspace` / `left` | Go up to parent |
+| `d` | Move selected entry to `~/.local/share/Trash/files/` |
 | `q` | Quit |
 
 ## Design
 
-- Single C file, ~350 lines.
+- Single C file, ~500 lines.
 - Uses `lstat` only — symlinks are never followed.
 - Recursion capped at depth 128 to prevent stack overflow.
 - All path construction bounds-checked with `snprintf`.
