@@ -23,6 +23,9 @@
 #include <sys/stat.h>
 
 #define MAX_NAME  256
+#define PAIR_BAR  1   /* header/footer: bright white on deep purple */
+#define PAIR_MAIN 2   /* list body:     bright white on deep-space blue-black */
+#define PAIR_SEL  3   /* selected row:  bright white on nebula purple */
 #define MAX_PATH  4096
 #define MAX_DEPTH 128
 
@@ -75,6 +78,30 @@ entry_free(Entry *e)
         entry_free(e->children[i]);
     free(e->children);
     free(e);
+}
+
+/* Remove e from its parent's children array and subtract its usage from all ancestors. */
+static void
+entry_detach(Entry *e)
+{
+    Entry *parent = e->parent;
+    if (!parent) return;
+
+    size_t i;
+    for (i = 0; i < parent->nchildren; i++)
+        if (parent->children[i] == e) break;
+    if (i == parent->nchildren) return;
+
+    memmove(&parent->children[i], &parent->children[i + 1],
+            (parent->nchildren - i - 1) * sizeof *parent->children);
+    parent->nchildren--;
+
+    int64_t du = e->disk_usage;
+    int64_t ic = e->item_count + 1;  /* items inside + the entry itself */
+    for (Entry *p = parent; p; p = p->parent) {
+        p->disk_usage -= du;
+        p->item_count -= ic;
+    }
 }
 
 /* ------------------------------------------------------------------ scan */
@@ -220,14 +247,19 @@ ui_draw(const UI *ui)
             if (pos >= (int)sizeof path - 1) { pos = (int)sizeof path - 1; break; }
         }
         if (pos == 0) { path[0] = '\0'; }
-        attron(A_REVERSE);
+        attron(COLOR_PAIR(PAIR_BAR));
         mvprintw(0, 0, "%-*s", cols, " space-travel");
         mvprintw(0, 14, "%.*s", cols - 14, path);
-        attroff(A_REVERSE);
+        attroff(COLOR_PAIR(PAIR_BAR));
     }
+
+#define BAR_WIDTH 20
 
     int list_h = rows - 2;
     if (list_h < 1) { refresh(); return; }
+
+    int64_t max_du = (ui->dir->nchildren > 0 && ui->dir->children[0]->disk_usage > 0)
+                     ? ui->dir->children[0]->disk_usage : 1;
 
     for (int i = 0; i < list_h; i++) {
         int idx = ui->off + i;
@@ -243,36 +275,117 @@ ui_draw(const UI *ui)
         else
             snprintf(cnt, sizeof cnt, "            ");
 
-        char line[512];
-        snprintf(line, sizeof line, "  %s  %s  %s%s",
-                 sz, cnt, c->name, c->is_dir ? "/" : "");
+        char bar[BAR_WIDTH + 3];
+        int fill = (int)((double)c->disk_usage / (double)max_du * BAR_WIDTH + 0.5);
+        if (fill > BAR_WIDTH) fill = BAR_WIDTH;
+        bar[0] = '[';
+        for (int b = 0; b < BAR_WIDTH; b++)
+            bar[1 + b] = b < fill ? '#' : ' ';
+        bar[BAR_WIDTH + 1] = ']';
+        bar[BAR_WIDTH + 2] = '\0';
 
-        if (idx == ui->sel) attron(A_REVERSE);
+        char line[512];
+        snprintf(line, sizeof line, "  %s  %s  %s  %s%s",
+                 cnt, sz, bar, c->name, c->is_dir ? "/" : "");
+
+        if (idx == ui->sel) attron(COLOR_PAIR(PAIR_SEL));
         mvprintw(1 + i, 0, "%-*.*s", cols, cols, line);
-        if (idx == ui->sel) attroff(A_REVERSE);
+        if (idx == ui->sel) attroff(COLOR_PAIR(PAIR_SEL));
     }
 
     if (ui->dir->nchildren == 0)
         mvprintw(1, 0, "  (empty)");
 
     /* footer: keybindings left, count right */
-    attron(A_REVERSE);
+    attron(COLOR_PAIR(PAIR_BAR));
     mvprintw(rows - 1, 0, "%-*s", cols,
-             "  up/k  down/j  right|enter: open dir  left|backspace: up  q: quit");
+             "  up/k  down/j  right|enter: open dir  left|backspace: up  d: trash  q: quit");
     if (ui->dir->nchildren > 0) {
         char info[64];
         snprintf(info, sizeof info, "%d / %zu  ", ui->sel + 1, ui->dir->nchildren);
         mvprintw(rows - 1, cols - (int)strlen(info), "%s", info);
     }
-    attroff(A_REVERSE);
+    attroff(COLOR_PAIR(PAIR_BAR));
 
     refresh();
+}
+
+/* Build the full filesystem path for a direct child of ui->dir. */
+static void
+entry_full_path(const UI *ui, const Entry *e, char *buf, size_t n)
+{
+    const Entry *chain[MAX_DEPTH + 2];
+    int d = 0;
+    for (const Entry *p = ui->dir; p && d < MAX_DEPTH + 1; p = p->parent)
+        chain[d++] = p;
+
+    int pos = 0;
+    for (int i = d - 1; i >= 0; i--) {
+        const char *seg = (i == d - 1) ? ui->root_path : chain[i]->name;
+        if (i < d - 1 && (pos == 0 || buf[pos - 1] != '/'))
+            pos += snprintf(buf + pos, n - (size_t)pos, "/");
+        pos += snprintf(buf + pos, n - (size_t)pos, "%s", seg);
+        if (pos >= (int)n - 1) break;
+    }
+    if (pos > 0 && buf[pos - 1] != '/')
+        pos += snprintf(buf + pos, n - (size_t)pos, "/");
+    snprintf(buf + pos, n - (size_t)pos, "%s", e->name);
+}
+
+/* Move the selected entry to ~/.local/share/Trash/files/. Returns error string or NULL. */
+static const char *
+do_trash(UI *ui)
+{
+    if (ui->dir->nchildren == 0) return NULL;
+    Entry *e = ui->dir->children[(size_t)ui->sel];
+
+    char src[MAX_PATH];
+    entry_full_path(ui, e, src, sizeof src);
+
+    const char *home = getenv("HOME");
+    if (!home) return "HOME not set";
+
+    /* ensure ~/.local/share/Trash/files exists */
+    char trash[MAX_PATH];
+    {
+        char tmp[MAX_PATH];
+        snprintf(tmp,   sizeof tmp,   "%s/.local",                   home); mkdir(tmp,   0700);
+        snprintf(tmp,   sizeof tmp,   "%s/.local/share",             home); mkdir(tmp,   0700);
+        snprintf(tmp,   sizeof tmp,   "%s/.local/share/Trash",       home); mkdir(tmp,   0700);
+        snprintf(trash, sizeof trash, "%s/.local/share/Trash/files", home); mkdir(trash, 0700);
+    }
+
+    /* pick a destination name that doesn't already exist */
+    char dst[MAX_PATH];
+    int r = snprintf(dst, sizeof dst, "%s/%s", trash, e->name);
+    if (r < 0 || (size_t)r >= sizeof dst) return "trash path too long";
+    struct stat st;
+    if (lstat(dst, &st) == 0) {
+        int found = 0;
+        for (int n = 1; n < 1000; n++) {
+            r = snprintf(dst, sizeof dst, "%s/%s.%d", trash, e->name, n);
+            if (r < 0 || (size_t)r >= sizeof dst) break;
+            if (lstat(dst, &st) != 0) { found = 1; break; }
+        }
+        if (!found) return "too many name collisions in trash";
+    }
+
+    if (rename(src, dst) != 0) return strerror(errno);
+
+    entry_detach(e);
+    entry_free(e);
+    return NULL;
 }
 
 static void
 run_ui(Entry *root, const char *root_path)
 {
     initscr();
+    start_color();
+    init_pair(PAIR_BAR,  15, 54);  /* bright white on deep purple  (#5f0087) */
+    init_pair(PAIR_MAIN, 15, 17);  /* bright white on space black  (#00005f) */
+    init_pair(PAIR_SEL,  15, 55);  /* bright white on nebula purple (#5f00af) */
+    bkgd(COLOR_PAIR(PAIR_MAIN));
     cbreak();
     noecho();
     keypad(stdscr, TRUE);
@@ -308,6 +421,33 @@ run_ui(Entry *root, const char *root_path)
                 ui.dir = parent;
                 ui.sel = parent->saved_sel;
                 ui.off = parent->saved_off;
+            }
+            break;
+
+        case 'd':
+            if (ui.dir->nchildren > 0) {
+                Entry *sel = ui.dir->children[(size_t)ui.sel];
+                int rows, cols;
+                getmaxyx(stdscr, rows, cols);
+                char prompt[MAX_NAME + 32];
+                snprintf(prompt, sizeof prompt, "  Trash \"%s\"? (y/n)", sel->name);
+                attron(COLOR_PAIR(PAIR_BAR));
+                mvprintw(rows - 1, 0, "%-*.*s", cols, cols, prompt);
+                attroff(COLOR_PAIR(PAIR_BAR));
+                refresh();
+                int ans = getch();
+                if (ans == 'y' || ans == 'Y') {
+                    const char *err = do_trash(&ui);
+                    if (err) {
+                        char errmsg[256];
+                        snprintf(errmsg, sizeof errmsg, "  Error: %s (press any key)", err);
+                        attron(COLOR_PAIR(PAIR_BAR));
+                        mvprintw(rows - 1, 0, "%-*.*s", cols, cols, errmsg);
+                        attroff(COLOR_PAIR(PAIR_BAR));
+                        refresh();
+                        getch();
+                    }
+                }
             }
             break;
 
