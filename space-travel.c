@@ -9,6 +9,7 @@
  */
 
 #define _POSIX_C_SOURCE 200809L
+#define _XOPEN_SOURCE   600
 
 #include <curses.h>
 #include <dirent.h>
@@ -166,7 +167,7 @@ fmt_size(int64_t b, char *buf, size_t n)
 
 /* ------------------------------------------------------------------ ui */
 
-typedef struct { Entry *dir; int sel; int off; } UI;
+typedef struct { Entry *dir; int sel; int off; char root_path[MAX_PATH]; } UI;
 
 /*
  * Keep sel and off consistent with the current directory and terminal size.
@@ -204,14 +205,16 @@ ui_draw(const UI *ui)
         for (Entry *e = ui->dir; e && d < MAX_DEPTH + 1; e = e->parent)
             chain[d++] = e;
 
-        char path[MAX_PATH] = "";
+        char path[MAX_PATH];
+        int pos = 0;
         for (int i = d - 1; i >= 0; i--) {
-            size_t rem = sizeof path - strlen(path) - 1;
-            if (rem == 0) break;
-            size_t plen = strlen(path);
-            if (i < d - 1 && (plen == 0 || path[plen - 1] != '/')) strncat(path, "/", rem--);
-            if (rem > 0)   strncat(path, chain[i]->name, rem);
+            const char *seg = (i == d - 1) ? ui->root_path : chain[i]->name;
+            if (i < d - 1 && (pos == 0 || path[pos - 1] != '/'))
+                pos += snprintf(path + pos, sizeof path - (size_t)pos, "/");
+            pos += snprintf(path + pos, sizeof path - (size_t)pos, "%s", seg);
+            if (pos >= (int)sizeof path - 1) { pos = (int)sizeof path - 1; break; }
         }
+        if (pos == 0) { path[0] = '\0'; }
         attron(A_REVERSE);
         mvprintw(0, 0, "%-*s", cols, " space-travel");
         mvprintw(0, 14, "%.*s", cols - 14, path);
@@ -256,7 +259,7 @@ ui_draw(const UI *ui)
 }
 
 static void
-run_ui(Entry *root)
+run_ui(Entry *root, const char *root_path)
 {
     initscr();
     cbreak();
@@ -265,6 +268,7 @@ run_ui(Entry *root)
     curs_set(0);
 
     UI ui = { .dir = root, .sel = 0, .off = 0 };
+    snprintf(ui.root_path, sizeof ui.root_path, "%s", root_path);
     ui_clamp(&ui);
     ui_draw(&ui);
 
@@ -321,7 +325,12 @@ main(int argc, char *argv[])
     size_t plen = strlen(path);
     while (plen > 1 && path[plen - 1] == '/') path[--plen] = '\0';
 
-    fprintf(stderr, "Scanning %s ...\n", path);
+    /* resolve to absolute path for display */
+    char real_path[MAX_PATH];
+    if (!realpath(path, real_path))
+        snprintf(real_path, sizeof real_path, "%s", path);
+
+    fprintf(stderr, "Scanning %s ...\n", real_path);
     fflush(stderr);
 
     Entry *root = scan(path, NULL, 0);
@@ -332,7 +341,7 @@ main(int argc, char *argv[])
     }
 
     entry_sort_recursive(root);
-    run_ui(root);
+    run_ui(root, real_path);
     entry_free(root);
     return 0;
 }

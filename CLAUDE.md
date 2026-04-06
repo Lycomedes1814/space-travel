@@ -20,6 +20,7 @@ Requires ncurses (`-lncurses`). Compiled with `-std=c11 -Wall -Wextra -Wpedantic
 
 - **Minimal**: no features beyond browsing disk usage.
 - **Safe**: `lstat` only (no symlink following), bounded recursion (`MAX_DEPTH 128`), all path construction bounds-checked with `snprintf`.
+- **Feature-test macros**: `_POSIX_C_SOURCE 200809L` and `_XOPEN_SOURCE 600` (required for `realpath`).
 - **No external deps** beyond libc and ncurses.
 
 ## Source layout
