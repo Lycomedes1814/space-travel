@@ -179,7 +179,7 @@ ui_clamp(UI *ui)
     int rows, cols;
     getmaxyx(stdscr, rows, cols);
     (void)cols;
-    int list_h = rows - 4;
+    int list_h = rows - 2;
     if (list_h < 1) list_h = 1;
 
     int max_sel = ui->dir->nchildren > 0 ? (int)(ui->dir->nchildren - 1) : 0;
