@@ -233,8 +233,8 @@ ui_draw(const UI *ui)
         fmt_size(c->disk_usage, sz, sizeof sz);
 
         char line[512];
-        snprintf(line, sizeof line, "  %s  %c  %s",
-                 sz, c->is_dir ? 'd' : ' ', c->name);
+        snprintf(line, sizeof line, "  %s     %s%s",
+                 sz, c->name, c->is_dir ? "/" : "");
 
         if (idx == ui->sel) attron(A_REVERSE);
         mvprintw(1 + i, 0, "%-*.*s", cols, cols, line);
