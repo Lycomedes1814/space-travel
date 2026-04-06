@@ -8,7 +8,7 @@ Minimal ncdu clone in C with ncurses.
 make
 ```
 
-Requires ncurses (`-lncurses`). Compiled with `-std=c11 -Wall -Wextra -Wpedantic`.
+Requires ncursesw (`-lncursesw`). Compiled with `-std=c11 -Wall -Wextra -Wpedantic`.
 
 ## Run
 
