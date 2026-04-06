@@ -7,7 +7,10 @@ PROG = space-travel
 $(PROG): space-travel.c
 	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
 
+install: $(PROG)
+	install -m 755 $(PROG) $(PREFIX)/bin/$(PROG)
+
 clean:
 	rm -f $(PROG)
 
-.PHONY: clean
+.PHONY: clean install
