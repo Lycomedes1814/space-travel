@@ -38,6 +38,7 @@ typedef struct Entry {
     size_t        cap;
     int           saved_sel;
     int           saved_off;
+    int64_t       item_count;  /* total items inside (recursive), 0 for files */
 } Entry;
 
 static Entry *
@@ -147,6 +148,10 @@ scan(const char *path, Entry *parent, int depth)
     }
 
     closedir(dir);
+
+    for (size_t i = 0; i < e->nchildren; i++)
+        e->item_count += 1 + e->children[i]->item_count;
+
     return e;
 }
 
@@ -232,9 +237,15 @@ ui_draw(const UI *ui)
         char sz[24];
         fmt_size(c->disk_usage, sz, sizeof sz);
 
+        char cnt[20];
+        if (c->is_dir)
+            snprintf(cnt, sizeof cnt, "%6" PRId64 " items", c->item_count);
+        else
+            snprintf(cnt, sizeof cnt, "            ");
+
         char line[512];
-        snprintf(line, sizeof line, "  %s     %s%s",
-                 sz, c->name, c->is_dir ? "/" : "");
+        snprintf(line, sizeof line, "  %s  %s  %s%s",
+                 sz, cnt, c->name, c->is_dir ? "/" : "");
 
         if (idx == ui->sel) attron(A_REVERSE);
         mvprintw(1 + i, 0, "%-*.*s", cols, cols, line);
