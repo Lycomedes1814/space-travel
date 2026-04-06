@@ -284,12 +284,13 @@ ui_draw(const UI *ui)
         bar[BAR_WIDTH + 1] = ']';
         bar[BAR_WIDTH + 2] = '\0';
 
-        char line[512];
-        snprintf(line, sizeof line, "  %s  %s  %s  %s%s",
-                 cnt, sz, bar, c->name, c->is_dir ? "/" : "");
-
-        if (idx == ui->sel) attron(COLOR_PAIR(PAIR_SEL));
-        mvprintw(1 + i, 0, "%-*.*s", cols, cols, line);
+        if (idx == ui->sel) {
+            attron(COLOR_PAIR(PAIR_SEL));
+            mvhline(1 + i, 0, ' ', cols);   /* paint full row for highlight */
+        }
+        mvprintw(1 + i, 0, "  %s  %s  %s  ", cnt, sz, bar);
+        addstr(c->name);
+        if (c->is_dir) addch('/');
         if (idx == ui->sel) attroff(COLOR_PAIR(PAIR_SEL));
     }
 
