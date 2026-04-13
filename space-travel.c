@@ -781,6 +781,11 @@ main(int argc, char *argv[])
         fprintf(stderr, "error: cannot scan '%s': %s\n", path, strerror(err));
         return 1;
     }
+    if (!root->is_dir) {
+        fprintf(stderr, "error: '%s' is not a directory\n", path);
+        entry_free(root);
+        return 1;
+    }
 
     entry_sort_recursive(root);
     run_ui(root, real_path);
