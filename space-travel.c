@@ -22,6 +22,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -526,6 +527,49 @@ remove_entry_recursive(const char *path)
 }
 
 static int
+run_trash_command(const char *cmd, char *const argv[])
+{
+    pid_t pid = fork();
+    if (pid < 0) return -1;
+
+    if (pid == 0) {
+        execvp(cmd, argv);
+        _exit(errno == ENOENT ? 127 : 126);
+    }
+
+    int status = 0;
+    if (waitpid(pid, &status, 0) < 0) return -1;
+
+    if (WIFEXITED(status)) {
+        int code = WEXITSTATUS(status);
+        if (code == 0) return 0;
+        if (code == 127) {
+            errno = ENOENT;
+            return -1;
+        }
+        errno = EIO;
+        return -1;
+    }
+
+    errno = EIO;
+    return -1;
+}
+
+static const char *
+try_system_trash(const char *src)
+{
+    char *const gio_argv[] = { "gio", "trash", "--", (char *)src, NULL };
+    if (run_trash_command("gio", gio_argv) == 0) return NULL;
+    if (errno != ENOENT) return "gio trash failed";
+
+    char *const trash_put_argv[] = { "trash-put", "--", (char *)src, NULL };
+    if (run_trash_command("trash-put", trash_put_argv) == 0) return NULL;
+    if (errno != ENOENT) return "trash-put failed";
+
+    return "no-system-trash";
+}
+
+static int
 trashinfo_escape_path(const char *src, char *dst, size_t n)
 {
     static const char hex[] = "0123456789ABCDEF";
@@ -595,7 +639,7 @@ write_trashinfo(const char *info_path, const char *src)
     return 0;
 }
 
-/* Move the selected entry to ~/.local/share/Trash/files/. Returns error string or NULL. */
+/* Move the selected entry to the system trash, falling back to a local trash implementation. */
 static const char *
 do_trash(UI *ui)
 {
@@ -604,6 +648,14 @@ do_trash(UI *ui)
 
     char src[MAX_PATH];
     entry_full_path(ui, e, src, sizeof src);
+
+    const char *system_err = try_system_trash(src);
+    if (!system_err) {
+        entry_detach(e);
+        entry_free(e);
+        return NULL;
+    }
+    if (strcmp(system_err, "no-system-trash") != 0) return system_err;
 
     const char *home = getenv("HOME");
     if (!home) return "HOME not set";

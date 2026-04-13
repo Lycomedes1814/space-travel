@@ -28,7 +28,7 @@ space-travel scans the given path, then opens an interactive browser sorted by d
 | `k` / `up` | Move up |
 | `enter` / `right` | Enter directory |
 | `backspace` / `left` | Go up to parent |
-| `d` | Move selected entry to `~/.local/share/Trash/files/` |
+| `d` | Move selected entry to the system trash (`gio trash`/`trash-put` if available, otherwise `~/.local/share/Trash/`) |
 | `q` | Quit |
 
 ## Design
@@ -37,4 +37,5 @@ space-travel scans the given path, then opens an interactive browser sorted by d
 - Uses `lstat` only — symlinks are never followed.
 - Recursion capped at depth 128 to prevent stack overflow.
 - All path construction bounds-checked with `snprintf`.
+- Prefers an installed system trash command and falls back to a minimal freedesktop-style trash implementation.
 - No dependencies beyond libc and ncurses.

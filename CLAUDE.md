@@ -40,5 +40,5 @@ Single file: `space-travel.c`. Sections in order:
 | `k` / `up` | Move up |
 | `enter` / `right` | Enter directory |
 | `backspace` / `left` | Go up to parent |
-| `d` | Move selected entry to `~/.local/share/Trash/files/` (confirms with y/n) |
+| `d` | Move selected entry to the system trash when available, otherwise `~/.local/share/Trash/files/` (confirms with y/n) |
 | `q` | Quit |
