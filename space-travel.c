@@ -14,6 +14,7 @@
 #include <curses.h>
 #include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <inttypes.h>
 #include <locale.h>
 #include <stdint.h>
@@ -21,6 +22,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
+#include <unistd.h>
 
 #define MAX_NAME  256
 #define PAIR_BAR  1   /* header/footer: bright white on deep purple */
@@ -104,6 +107,31 @@ entry_detach(Entry *e)
     }
 }
 
+static int
+path_append(char *buf, size_t n, size_t *pos, const char *s)
+{
+    if (*pos >= n) return -1;
+
+    int r = snprintf(buf + *pos, n - *pos, "%s", s);
+    if (r < 0) return -1;
+
+    size_t written = (size_t)r;
+    if (written >= n - *pos) {
+        *pos = n - 1;
+        return -1;
+    }
+
+    *pos += written;
+    return 0;
+}
+
+static int
+path_append_char(char *buf, size_t n, size_t *pos, char c)
+{
+    char tmp[2] = { c, '\0' };
+    return path_append(buf, n, pos, tmp);
+}
+
 /* ------------------------------------------------------------------ scan */
 
 static int
@@ -169,9 +197,10 @@ scan(const char *path, Entry *parent, int depth)
         Entry *child = scan(child_path, e, depth + 1);
         if (!child) continue;
 
-        e->disk_usage += child->disk_usage;
         if (entry_push(e, child) != 0)
             entry_free(child);   /* OOM: discard child rather than corrupt tree */
+        else
+            e->disk_usage += child->disk_usage;
     }
 
     closedir(dir);
@@ -238,13 +267,13 @@ ui_draw(const UI *ui)
             chain[d++] = e;
 
         char path[MAX_PATH];
-        int pos = 0;
+        size_t pos = 0;
         for (int i = d - 1; i >= 0; i--) {
             const char *seg = (i == d - 1) ? ui->root_path : chain[i]->name;
-            if (i < d - 1 && (pos == 0 || path[pos - 1] != '/'))
-                pos += snprintf(path + pos, sizeof path - (size_t)pos, "/");
-            pos += snprintf(path + pos, sizeof path - (size_t)pos, "%s", seg);
-            if (pos >= (int)sizeof path - 1) { pos = (int)sizeof path - 1; break; }
+            if (i < d - 1 && (pos == 0 || path[pos - 1] != '/')) {
+                if (path_append_char(path, sizeof path, &pos, '/') != 0) break;
+            }
+            if (path_append(path, sizeof path, &pos, seg) != 0) break;
         }
         if (pos == 0) { path[0] = '\0'; }
         attron(COLOR_PAIR(PAIR_BAR));
@@ -317,20 +346,253 @@ entry_full_path(const UI *ui, const Entry *e, char *buf, size_t n)
 {
     const Entry *chain[MAX_DEPTH + 2];
     int d = 0;
+    size_t pos = 0;
+
+    if (n == 0) return;
+
     for (const Entry *p = ui->dir; p && d < MAX_DEPTH + 1; p = p->parent)
         chain[d++] = p;
 
-    int pos = 0;
     for (int i = d - 1; i >= 0; i--) {
         const char *seg = (i == d - 1) ? ui->root_path : chain[i]->name;
-        if (i < d - 1 && (pos == 0 || buf[pos - 1] != '/'))
-            pos += snprintf(buf + pos, n - (size_t)pos, "/");
-        pos += snprintf(buf + pos, n - (size_t)pos, "%s", seg);
-        if (pos >= (int)n - 1) break;
+        if (i < d - 1 && (pos == 0 || buf[pos - 1] != '/')) {
+            if (path_append_char(buf, n, &pos, '/') != 0) return;
+        }
+        if (path_append(buf, n, &pos, seg) != 0) return;
     }
-    if (pos > 0 && buf[pos - 1] != '/')
-        pos += snprintf(buf + pos, n - (size_t)pos, "/");
-    snprintf(buf + pos, n - (size_t)pos, "%s", e->name);
+    if (pos > 0 && buf[pos - 1] != '/') {
+        if (path_append_char(buf, n, &pos, '/') != 0) return;
+    }
+    (void)path_append(buf, n, &pos, e->name);
+}
+
+static int
+copy_file_contents(const char *src, const char *dst, mode_t mode)
+{
+    int in_fd = open(src, O_RDONLY);
+    if (in_fd < 0) return -1;
+
+    int out_fd = open(dst, O_WRONLY | O_CREAT | O_EXCL, mode & 0777);
+    if (out_fd < 0) {
+        int err = errno;
+        close(in_fd);
+        errno = err;
+        return -1;
+    }
+
+    char buf[65536];
+    for (;;) {
+        ssize_t nr = read(in_fd, buf, sizeof buf);
+        if (nr == 0) break;
+        if (nr < 0) {
+            int err = errno;
+            close(in_fd);
+            close(out_fd);
+            unlink(dst);
+            errno = err;
+            return -1;
+        }
+
+        ssize_t off = 0;
+        while (off < nr) {
+            ssize_t nw = write(out_fd, buf + off, (size_t)(nr - off));
+            if (nw < 0) {
+                int err = errno;
+                close(in_fd);
+                close(out_fd);
+                unlink(dst);
+                errno = err;
+                return -1;
+            }
+            off += nw;
+        }
+    }
+
+    if (close(in_fd) != 0) {
+        int err = errno;
+        close(out_fd);
+        unlink(dst);
+        errno = err;
+        return -1;
+    }
+    if (close(out_fd) != 0) {
+        int err = errno;
+        unlink(dst);
+        errno = err;
+        return -1;
+    }
+
+    return 0;
+}
+
+static int
+copy_entry_recursive(const char *src, const char *dst)
+{
+    struct stat st;
+    if (lstat(src, &st) != 0) return -1;
+
+    if (S_ISLNK(st.st_mode)) {
+        char target[MAX_PATH];
+        ssize_t len = readlink(src, target, sizeof target - 1);
+        if (len < 0) return -1;
+        target[len] = '\0';
+        return symlink(target, dst);
+    }
+
+    if (S_ISDIR(st.st_mode)) {
+        if (mkdir(dst, st.st_mode & 0777) != 0) return -1;
+
+        DIR *dir = opendir(src);
+        if (!dir) {
+            int err = errno;
+            rmdir(dst);
+            errno = err;
+            return -1;
+        }
+
+        struct dirent *de;
+        char child_src[MAX_PATH];
+        char child_dst[MAX_PATH];
+
+        while ((de = readdir(dir)) != NULL) {
+            if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0)
+                continue;
+
+            int sr = snprintf(child_src, sizeof child_src, "%s/%s", src, de->d_name);
+            int dr = snprintf(child_dst, sizeof child_dst, "%s/%s", dst, de->d_name);
+            if (sr < 0 || dr < 0 ||
+                (size_t)sr >= sizeof child_src || (size_t)dr >= sizeof child_dst) {
+                closedir(dir);
+                errno = ENAMETOOLONG;
+                return -1;
+            }
+
+            if (copy_entry_recursive(child_src, child_dst) != 0) {
+                int err = errno;
+                closedir(dir);
+                errno = err;
+                return -1;
+            }
+        }
+
+        if (closedir(dir) != 0) return -1;
+        return 0;
+    }
+
+    if (S_ISREG(st.st_mode))
+        return copy_file_contents(src, dst, st.st_mode);
+
+    errno = EXDEV;
+    return -1;
+}
+
+static int
+remove_entry_recursive(const char *path)
+{
+    struct stat st;
+    if (lstat(path, &st) != 0) return -1;
+
+    if (S_ISDIR(st.st_mode)) {
+        DIR *dir = opendir(path);
+        if (!dir) return -1;
+
+        struct dirent *de;
+        char child_path[MAX_PATH];
+
+        while ((de = readdir(dir)) != NULL) {
+            if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0)
+                continue;
+
+            int r = snprintf(child_path, sizeof child_path, "%s/%s", path, de->d_name);
+            if (r < 0 || (size_t)r >= sizeof child_path) {
+                closedir(dir);
+                errno = ENAMETOOLONG;
+                return -1;
+            }
+
+            if (remove_entry_recursive(child_path) != 0) {
+                int err = errno;
+                closedir(dir);
+                errno = err;
+                return -1;
+            }
+        }
+
+        if (closedir(dir) != 0) return -1;
+        return rmdir(path);
+    }
+
+    return unlink(path);
+}
+
+static int
+trashinfo_escape_path(const char *src, char *dst, size_t n)
+{
+    static const char hex[] = "0123456789ABCDEF";
+    size_t pos = 0;
+
+    if (n == 0) return -1;
+
+    for (size_t i = 0; src[i] != '\0'; i++) {
+        unsigned char c = (unsigned char)src[i];
+        int safe = (c >= 'A' && c <= 'Z') ||
+                   (c >= 'a' && c <= 'z') ||
+                   (c >= '0' && c <= '9') ||
+                   c == '/' || c == '-' || c == '_' || c == '.' || c == '~';
+
+        if (safe) {
+            if (pos + 1 >= n) return -1;
+            dst[pos++] = (char)c;
+        } else {
+            if (pos + 3 >= n) return -1;
+            dst[pos++] = '%';
+            dst[pos++] = hex[c >> 4];
+            dst[pos++] = hex[c & 0x0F];
+        }
+    }
+
+    dst[pos] = '\0';
+    return 0;
+}
+
+static int
+write_trashinfo(const char *info_path, const char *src)
+{
+    char escaped[MAX_PATH * 3];
+    if (trashinfo_escape_path(src, escaped, sizeof escaped) != 0) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+
+    time_t now = time(NULL);
+    struct tm tm_now;
+    if (!localtime_r(&now, &tm_now)) return -1;
+
+    char ts[32];
+    if (strftime(ts, sizeof ts, "%Y-%m-%dT%H:%M:%S", &tm_now) == 0) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    FILE *fp = fopen(info_path, "wx");
+    if (!fp) return -1;
+
+    if (fprintf(fp, "[Trash Info]\nPath=%s\nDeletionDate=%s\n", escaped, ts) < 0) {
+        int err = errno;
+        fclose(fp);
+        unlink(info_path);
+        errno = err ? err : EIO;
+        return -1;
+    }
+
+    if (fclose(fp) != 0) {
+        int err = errno;
+        unlink(info_path);
+        errno = err;
+        return -1;
+    }
+
+    return 0;
 }
 
 /* Move the selected entry to ~/.local/share/Trash/files/. Returns error string or NULL. */
@@ -348,30 +610,58 @@ do_trash(UI *ui)
 
     /* ensure ~/.local/share/Trash/files exists */
     char trash[MAX_PATH];
+    char trash_info[MAX_PATH];
     {
         char tmp[MAX_PATH];
         snprintf(tmp,   sizeof tmp,   "%s/.local",                   home); mkdir(tmp,   0700);
         snprintf(tmp,   sizeof tmp,   "%s/.local/share",             home); mkdir(tmp,   0700);
         snprintf(tmp,   sizeof tmp,   "%s/.local/share/Trash",       home); mkdir(tmp,   0700);
         snprintf(trash, sizeof trash, "%s/.local/share/Trash/files", home); mkdir(trash, 0700);
+        snprintf(trash_info, sizeof trash_info, "%s/.local/share/Trash/info", home); mkdir(trash_info, 0700);
     }
 
-    /* pick a destination name that doesn't already exist */
+    /* pick a destination name that doesn't already exist in files or info */
     char dst[MAX_PATH];
-    int r = snprintf(dst, sizeof dst, "%s/%s", trash, e->name);
-    if (r < 0 || (size_t)r >= sizeof dst) return "trash path too long";
+    char info_path[MAX_PATH];
     struct stat st;
-    if (lstat(dst, &st) == 0) {
-        int found = 0;
-        for (int n = 1; n < 1000; n++) {
-            r = snprintf(dst, sizeof dst, "%s/%s.%d", trash, e->name, n);
-            if (r < 0 || (size_t)r >= sizeof dst) break;
-            if (lstat(dst, &st) != 0) { found = 1; break; }
+    int found = 0;
+    for (int n = 0; n < 1000; n++) {
+        char stem[MAX_NAME + 16];
+        int stem_r = (n == 0)
+                   ? snprintf(stem, sizeof stem, "%s", e->name)
+                   : snprintf(stem, sizeof stem, "%s.%d", e->name, n);
+        int dst_r = snprintf(dst, sizeof dst, "%s/%s", trash, stem);
+        int info_r = snprintf(info_path, sizeof info_path, "%s/%s.trashinfo", trash_info, stem);
+
+        if (stem_r < 0 || dst_r < 0 || info_r < 0 ||
+            (size_t)stem_r >= sizeof stem ||
+            (size_t)dst_r >= sizeof dst ||
+            (size_t)info_r >= sizeof info_path) {
+            return "trash path too long";
         }
-        if (!found) return "too many name collisions in trash";
+
+        if (lstat(dst, &st) != 0 && lstat(info_path, &st) != 0) {
+            found = 1;
+            break;
+        }
+    }
+    if (!found) return "too many name collisions in trash";
+
+    if (rename(src, dst) != 0) {
+        if (errno != EXDEV) return strerror(errno);
+        if (copy_entry_recursive(src, dst) != 0) return strerror(errno);
+        if (remove_entry_recursive(src) != 0) {
+            int err = errno;
+            remove_entry_recursive(dst);
+            return strerror(err);
+        }
     }
 
-    if (rename(src, dst) != 0) return strerror(errno);
+    if (write_trashinfo(info_path, src) != 0) {
+        int err = errno;
+        remove_entry_recursive(dst);
+        return strerror(err);
+    }
 
     entry_detach(e);
     entry_free(e);

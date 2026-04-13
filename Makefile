@@ -3,6 +3,7 @@ CFLAGS  = -std=c11 -Wall -Wextra -Wpedantic -O2
 LDFLAGS = -lncursesw
 
 PROG = space-travel
+PREFIX ?= /usr/local
 
 $(PROG): space-travel.c
 	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
