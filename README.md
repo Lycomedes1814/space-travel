@@ -33,7 +33,7 @@ space-travel scans the given path, then opens an interactive browser sorted by d
 
 ## Design
 
-- Single C file, ~500 lines.
+- Single C file.
 - Uses `lstat` only — symlinks are never followed.
 - Recursion capped at depth 128 to prevent stack overflow.
 - All path construction bounds-checked with `snprintf`.
