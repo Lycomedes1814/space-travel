@@ -12,6 +12,6 @@ install: $(PROG)
 	install -m 755 $(PROG) $(PREFIX)/bin/$(PROG)
 
 clean:
-	rm -f $(PROG)
+	rm -f $(PROG) *.o
 
 .PHONY: clean install
