@@ -277,7 +277,8 @@ ui_draw(const UI *ui)
         if (pos == 0) { path[0] = '\0'; }
         attron(COLOR_PAIR(PAIR_BAR));
         mvprintw(0, 0, "%-*s", cols, " space-travel");
-        mvprintw(0, 14, "%.*s", cols - 14, path);
+        if (cols > 14)
+            mvprintw(0, 14, "%.*s", cols - 14, path);
         attroff(COLOR_PAIR(PAIR_BAR));
     }
 
@@ -332,7 +333,9 @@ ui_draw(const UI *ui)
     if (ui->dir->nchildren > 0) {
         char info[64];
         snprintf(info, sizeof info, "%d / %zu  ", ui->sel + 1, ui->dir->nchildren);
-        mvprintw(rows - 1, cols - (int)strlen(info), "%s", info);
+        int info_col = cols - (int)strlen(info);
+        if (info_col > 0)
+            mvprintw(rows - 1, info_col, "%s", info);
     }
     attroff(COLOR_PAIR(PAIR_BAR));
 
@@ -340,14 +343,15 @@ ui_draw(const UI *ui)
 }
 
 /* Build the full filesystem path for a direct child of ui->dir. */
-static void
+static int
 entry_full_path(const UI *ui, const Entry *e, char *buf, size_t n)
 {
     const Entry *chain[MAX_DEPTH + 2];
     int d = 0;
     size_t pos = 0;
 
-    if (n == 0) return;
+    if (n == 0) return -1;
+    buf[0] = '\0';
 
     for (const Entry *p = ui->dir; p && d < MAX_DEPTH + 1; p = p->parent)
         chain[d++] = p;
@@ -355,14 +359,15 @@ entry_full_path(const UI *ui, const Entry *e, char *buf, size_t n)
     for (int i = d - 1; i >= 0; i--) {
         const char *seg = (i == d - 1) ? ui->root_path : chain[i]->name;
         if (i < d - 1 && (pos == 0 || buf[pos - 1] != '/')) {
-            if (path_append_char(buf, n, &pos, '/') != 0) return;
+            if (path_append_char(buf, n, &pos, '/') != 0) return -1;
         }
-        if (path_append(buf, n, &pos, seg) != 0) return;
+        if (path_append(buf, n, &pos, seg) != 0) return -1;
     }
     if (pos > 0 && buf[pos - 1] != '/') {
-        if (path_append_char(buf, n, &pos, '/') != 0) return;
+        if (path_append_char(buf, n, &pos, '/') != 0) return -1;
     }
-    (void)path_append(buf, n, &pos, e->name);
+    if (path_append(buf, n, &pos, e->name) != 0) return -1;
+    return 0;
 }
 
 static int
@@ -402,7 +407,8 @@ do_trash(UI *ui)
     Entry *e = ui->dir->children[(size_t)ui->sel];
 
     char src[MAX_PATH];
-    entry_full_path(ui, e, src, sizeof src);
+    if (entry_full_path(ui, e, src, sizeof src) != 0)
+        return "path too long";
 
     char *const gio_argv[] = { "gio", "trash", "--", src, NULL };
     if (run_trash_command("gio", gio_argv) == 0) {
@@ -439,6 +445,11 @@ run_ui(Entry *root, const char *root_path)
 
     UI ui = { .dir = root, .sel = 0, .off = 0 };
     snprintf(ui.root_path, sizeof ui.root_path, "%s", root_path);
+    if (strlen(root_path) >= sizeof ui.root_path) {
+        endwin();
+        fprintf(stderr, "error: path too long: %s\n", root_path);
+        return;
+    }
     ui_clamp(&ui);
     ui_draw(&ui);
 
