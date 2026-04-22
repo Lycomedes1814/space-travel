@@ -131,6 +131,22 @@ path_append_char(char *buf, size_t n, size_t *pos, char c)
     return path_append(buf, n, pos, tmp);
 }
 
+static int
+path_join(char *buf, size_t n, const char *base, const char *name)
+{
+    size_t pos = 0;
+
+    if (n == 0) return -1;
+    buf[0] = '\0';
+
+    if (path_append(buf, n, &pos, base) != 0) return -1;
+    if (pos > 0 && buf[pos - 1] != '/') {
+        if (path_append_char(buf, n, &pos, '/') != 0) return -1;
+    }
+    if (path_append(buf, n, &pos, name) != 0) return -1;
+    return 0;
+}
+
 /* ------------------------------------------------------------------ scan */
 
 static int
@@ -168,7 +184,10 @@ basename_of(const char *path)
 static Entry *
 scan(const char *path, Entry *parent, int depth)
 {
-    if (depth > MAX_DEPTH) return NULL;
+    if (depth > MAX_DEPTH) {
+        errno = ENAMETOOLONG;
+        return NULL;
+    }
 
     struct stat st;
     if (lstat(path, &st) != 0) return NULL;
@@ -190,16 +209,29 @@ scan(const char *path, Entry *parent, int depth)
         if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0)
             continue;
 
-        int r = snprintf(child_path, sizeof child_path, "%s/%s", path, de->d_name);
-        if (r < 0 || (size_t)r >= sizeof child_path) continue; /* path too long */
+        if (path_join(child_path, sizeof child_path, path, de->d_name) != 0) {
+            errno = ENAMETOOLONG;
+            entry_free(e);
+            closedir(dir);
+            return NULL;
+        }
 
         Entry *child = scan(child_path, e, depth + 1);
-        if (!child) continue;
+        if (!child) {
+            entry_free(e);
+            closedir(dir);
+            return NULL;
+        }
 
-        if (entry_push(e, child) != 0)
-            entry_free(child);   /* OOM: discard child rather than corrupt tree */
-        else
-            e->disk_usage += child->disk_usage;
+        if (entry_push(e, child) != 0) {
+            entry_free(child);
+            errno = ENOMEM;
+            entry_free(e);
+            closedir(dir);
+            return NULL;
+        }
+
+        e->disk_usage += child->disk_usage;
     }
 
     closedir(dir);
@@ -528,15 +560,24 @@ main(int argc, char *argv[])
     setlocale(LC_ALL, "");
 
     char path[MAX_PATH];
-    snprintf(path, sizeof path, "%s", argc > 1 ? argv[1] : ".");
+    int path_len = snprintf(path, sizeof path, "%s", argc > 1 ? argv[1] : ".");
+    if (path_len < 0 || (size_t)path_len >= sizeof path) {
+        fprintf(stderr, "error: path too long\n");
+        return 1;
+    }
     /* strip trailing slashes; preserve bare "/" */
     size_t plen = strlen(path);
     while (plen > 1 && path[plen - 1] == '/') path[--plen] = '\0';
 
     /* resolve to absolute path for display */
     char real_path[MAX_PATH];
-    if (!realpath(path, real_path))
-        snprintf(real_path, sizeof real_path, "%s", path);
+    if (!realpath(path, real_path)) {
+        int real_len = snprintf(real_path, sizeof real_path, "%s", path);
+        if (real_len < 0 || (size_t)real_len >= sizeof real_path) {
+            fprintf(stderr, "error: path too long\n");
+            return 1;
+        }
+    }
 
     fprintf(stderr, "Scanning %s ...\n", real_path);
     fflush(stderr);
